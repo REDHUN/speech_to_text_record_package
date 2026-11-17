@@ -1,21 +1,33 @@
-
 group 'com.speechtotextrecord'
 version '0.1.0'
+
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.7.3'
+    }
+}
 
 apply plugin: 'com.android.library'
 
 android {
     namespace 'com.speechtotextrecord'
-
     compileSdk 35
 
     defaultConfig {
-        minSdk 24
+        minSdk 33
     }
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
     }
 
     sourceSets {

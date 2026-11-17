@@ -76,13 +76,10 @@ final class SpeechToTextRecord {
   /// - Requires Android 13+ (API 33+) and foreground activity focus.
   /// - [localeId] specifies the BCP-47 language tag (e.g. `'en-US'`, `'en-IN'`, `'hi-IN'`).
   /// - [onDevice] requests on-device speech recognition if supported by the OS.
-  /// - [enablePunctuation] enables punctuation (periods, commas, question marks)
-  ///   and capitalization (defaults to `true`).
   /// - [audioPath] optional custom absolute path for the output `.wav` file.
   Future<void> start({
     String localeId = 'en-US',
     bool onDevice = false,
-    bool enablePunctuation = true,
     String? audioPath,
   }) async {
     if (localeId.trim().isEmpty) {
@@ -92,7 +89,6 @@ final class SpeechToTextRecord {
     await _methods.invokeMethod<void>('start', {
       'localeId': localeId,
       'onDevice': onDevice,
-      'enablePunctuation': enablePunctuation,
       if (audioPath != null) 'audioPath': audioPath,
     });
   }

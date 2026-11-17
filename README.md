@@ -124,9 +124,8 @@ void startListening() {
 
 ```dart
 await recorder.start(
-  localeId: 'en-US',           // Or 'en-IN', 'hi-IN', 'ml-IN', etc.
-  onDevice: false,             // Set to true if on-device model is installed
-  enablePunctuation: true,     // Enables commas, periods, question marks & capitalization
+  localeId: 'en-US', // Or 'en-IN', 'hi-IN', 'ml-IN', etc.
+  onDevice: false,   // Set to true if on-device model is installed
   // audioPath: '/custom/path/to/my_recording.wav', // Optional custom path
 );
 ```

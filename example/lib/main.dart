@@ -52,7 +52,6 @@ class _RecorderScreenState extends State<RecorderScreen> {
 
   String _selectedLocale = 'en-IN';
   bool _onDeviceOnly = false;
-  bool _enablePunctuation = true;
   bool _hasPermission = false;
   bool _sttAvailable = false;
 
@@ -143,7 +142,6 @@ class _RecorderScreenState extends State<RecorderScreen> {
       await _recorder.start(
         localeId: _selectedLocale,
         onDevice: _onDeviceOnly,
-        enablePunctuation: _enablePunctuation,
       );
     } catch (e) {
       if (mounted) {
@@ -244,15 +242,6 @@ class _RecorderScreenState extends State<RecorderScreen> {
                       onChanged: isRecording || isBusy
                           ? null
                           : (val) => setState(() => _onDeviceOnly = val),
-                    ),
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      title: const Text('Auto-punctuation & formatting'),
-                      subtitle: const Text('Inserts commas, periods, question marks, and capitalization'),
-                      value: _enablePunctuation,
-                      onChanged: isRecording || isBusy
-                          ? null
-                          : (val) => setState(() => _enablePunctuation = val),
                     ),
                     const Divider(),
                     Row(
