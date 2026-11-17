@@ -14,7 +14,11 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 
-/** One AudioRecord owns the mic; disk writing is independent of speech pipe backpressure. */
+/**
+ * One AudioRecord owns the mic; disk writing is independent of speech pipe backpressure.
+ * Supports dynamic speech pipe recreation to allow continuous SpeechRecognizer restarts
+ * across silence pauses, utterance boundaries, and network reconnections.
+ */
 internal class CaptureSession(
     val file: File,
     private val onLevel: (Double) -> Unit,
@@ -28,17 +32,45 @@ internal class CaptureSession(
     private val running = AtomicBoolean(false)
     private val feeding = AtomicBoolean(true)
     private val queue = ArrayBlockingQueue<ByteArray>(256) // ~5.12 seconds of PCM buffer
-    private val pipe = ParcelFileDescriptor.createPipe()
-    val speechInput: ParcelFileDescriptor get() = pipe[0]
+
+    @Volatile
+    private var activePipe: Array<ParcelFileDescriptor>? = null
+
     private var audio: AudioRecord? = null
     private var wav: WavWriter? = null
     var started = false
         private set
 
+    /**
+     * Creates a new non-blocking pipe for a SpeechRecognizer session.
+     * Closes any previous pipe descriptors safely.
+     * Returns the read end of the pipe to be passed as EXTRA_AUDIO_SOURCE.
+     */
+    @Synchronized
+    fun createSpeechPipe(): ParcelFileDescriptor {
+        closeSpeechPipe()
+        val newPipe = ParcelFileDescriptor.createPipe()
+        val flags = Os.fcntlInt(newPipe[1].fileDescriptor, OsConstants.F_GETFL, 0)
+        Os.fcntlInt(newPipe[1].fileDescriptor, OsConstants.F_SETFL, flags or OsConstants.O_NONBLOCK)
+        activePipe = newPipe
+        return newPipe[0]
+    }
+
+    @Synchronized
+    fun closeSpeechPipe() {
+        val old = activePipe
+        activePipe = null
+        if (old != null) {
+            runCatching { old[0].close() }
+            runCatching { old[1].close() }
+        }
+    }
+
     fun start() {
         try {
-            val flags = Os.fcntlInt(pipe[1].fileDescriptor, OsConstants.F_GETFL, 0)
-            Os.fcntlInt(pipe[1].fileDescriptor, OsConstants.F_SETFL, flags or OsConstants.O_NONBLOCK)
+            if (activePipe == null) {
+                createSpeechPipe()
+            }
             val minimum = AudioRecord.getMinBufferSize(
                 RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
             )
@@ -61,8 +93,7 @@ internal class CaptureSession(
             feeding.set(false)
             runCatching { audio?.release() }
             runCatching { wav?.close() }
-            closeInput()
-            runCatching { pipe[1].close() }
+            closeSpeechPipe()
             file.delete()
             throw error
         }
@@ -75,28 +106,29 @@ internal class CaptureSession(
     fun disableSpeech() {
         feeding.set(false)
         queue.clear()
+        closeSpeechPipe()
     }
 
     fun closeInput() {
-        runCatching { pipe[0].close() }
+        closeSpeechPipe()
     }
 
     fun abortBeforeStart() {
         disableSpeech()
-        closeInput()
-        runCatching { pipe[1].close() }
+        closeSpeechPipe()
         file.delete()
     }
 
     private fun speechFailure(message: String) {
         if (feeding.getAndSet(false)) {
             queue.clear()
+            closeSpeechPipe()
             onIssue("speech_pipe_failed", "$message Audio recording continues.")
         }
     }
 
     private fun capture() {
-        val bytes = ByteArray(640) // 20ms PCM16 mono
+        val bytes = ByteArray(640) // 20ms PCM16 mono at 16kHz
         var success = true
         var lastLevel = 0L
         try {
@@ -106,10 +138,19 @@ internal class CaptureSession(
                 if (!running.get()) break
                 if (count < 0) error("AudioRecord read failed ($count)")
                 if (count == 0) continue
+
+                // 1. Write unconditionally to WAV on disk
                 wav!!.write(bytes, count)
-                if (feeding.get() && !queue.offer(bytes.copyOf(count))) {
-                    speechFailure("Speech service fell behind the microphone.")
+
+                // 2. Feed speech pipe buffer (if full, discard oldest chunk rather than failing)
+                if (feeding.get()) {
+                    if (!queue.offer(bytes.copyOf(count))) {
+                        queue.poll()
+                        queue.offer(bytes.copyOf(count))
+                    }
                 }
+
+                // 3. Throttle volume level updates to ~10 Hz
                 val now = SystemClock.elapsedRealtime()
                 if (now - lastLevel >= 100) {
                     var peak = 0
@@ -141,20 +182,37 @@ internal class CaptureSession(
     private fun feedSpeech() {
         try {
             while (feeding.get() && (running.get() || queue.isNotEmpty())) {
+                val p = activePipe
+                if (p == null) {
+                    // Recognizer session ended, restarting, or waiting for a new pipe
+                    Thread.sleep(20)
+                    continue
+                }
                 val chunk = queue.poll(100, TimeUnit.MILLISECONDS) ?: continue
                 var offset = 0
                 var lastProgress = SystemClock.elapsedRealtime()
-                while (offset < chunk.size && feeding.get()) {
+
+                while (offset < chunk.size && feeding.get() && activePipe === p) {
                     try {
-                        val written = Os.write(pipe[1].fileDescriptor, chunk, offset, chunk.size - offset)
+                        val written = Os.write(p[1].fileDescriptor, chunk, offset, chunk.size - offset)
                         if (written > 0) {
                             offset += written
                             lastProgress = SystemClock.elapsedRealtime()
                         }
                     } catch (error: ErrnoException) {
-                        if (error.errno != OsConstants.EAGAIN && error.errno != OsConstants.EINTR) throw error
+                        if (error.errno == OsConstants.EPIPE || error.errno == OsConstants.EBADF) {
+                            // Remote reader closed pipe when its session finished or before restarting.
+                            // Close this pipe descriptor and await the next session pipe.
+                            closeSpeechPipe()
+                            break
+                        }
+                        if (error.errno != OsConstants.EAGAIN && error.errno != OsConstants.EINTR) {
+                            closeSpeechPipe()
+                            break
+                        }
                         if (SystemClock.elapsedRealtime() - lastProgress > 5000) {
-                            throw IllegalStateException("Speech service stopped reading audio")
+                            closeSpeechPipe()
+                            break
                         }
                         Thread.sleep(5)
                     }
@@ -163,7 +221,7 @@ internal class CaptureSession(
         } catch (error: Exception) {
             speechFailure(error.message ?: "Speech pipe failed")
         } finally {
-            runCatching { pipe[1].close() } // EOF triggers segmented-session finalization.
+            closeSpeechPipe()
             queue.clear()
         }
     }
