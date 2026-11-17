@@ -55,6 +55,7 @@ class SpeechToTextRecordPlugin : FlutterPlugin, ActivityAware, MethodChannel.Met
     private var speechDone = false
     private var speechComplete = false
     private var committed = ""
+    private var enablePunctuation = true
     private var lastResult: Map<String, Any>? = null
     private val stopResults = mutableListOf<MethodChannel.Result>()
     private val cancelResults = mutableListOf<MethodChannel.Result>()
@@ -162,6 +163,7 @@ class SpeechToTextRecordPlugin : FlutterPlugin, ActivityAware, MethodChannel.Met
             return
         }
         val onDevice = call.argument<Boolean>("onDevice") ?: false
+        enablePunctuation = call.argument<Boolean>("enablePunctuation") ?: true
         if (onDevice && !SpeechRecognizer.isOnDeviceRecognitionAvailable(context)) {
             result.error("on_device_unavailable", "No on-device speech recognizer is available on this device.", null)
             return
@@ -242,6 +244,14 @@ class SpeechToTextRecordPlugin : FlutterPlugin, ActivityAware, MethodChannel.Met
                 putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
                 putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, CaptureSession.RATE)
                 putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION, RecognizerIntent.EXTRA_AUDIO_SOURCE)
+
+                if (enablePunctuation) {
+                    putExtra("android.speech.extra.ENABLE_FORMATTING", "android.speech.extra.FORMATTING_OPTIMIZE_QUALITY")
+                    putExtra("android.speech.extra.HIDE_PARTIAL_TRAILING_PUNCTUATION", false)
+                    putExtra("android.speech.extra.DICTATION_MODE", true)
+                    putExtra("android.speech.extra.ENABLE_PUNCTUATION", true)
+                    putExtra("android.speech.extra.REQUEST_PUNCTUATION", true)
+                }
             }
 
             // Start hardware capture before asking the speech service to consume the pipe
@@ -274,13 +284,55 @@ class SpeechToTextRecordPlugin : FlutterPlugin, ActivityAware, MethodChannel.Met
         private fun text(results: Bundle?) =
             results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
 
+        private fun formatPunctuation(rawText: String): String {
+            if (!enablePunctuation || rawText.isEmpty()) return rawText
+            var text = rawText
+            text = text.replace(Regex("(?i)\\b(period|full stop)\\b"), ".")
+                .replace(Regex("(?i)\\bcomma\\b"), ",")
+                .replace(Regex("(?i)\\bquestion mark\\b"), "?")
+                .replace(Regex("(?i)\\bexclamation (mark|point)\\b"), "!")
+                .replace(Regex("(?i)\\bcolon\\b"), ":")
+                .replace(Regex("(?i)\\bsemicolon\\b"), ";")
+            text = text.replace(Regex("\\s+([.,!?:;])"), "$1")
+            text = text.replace(Regex("([.,!?:;])([a-zA-Z])"), "$1 $2")
+            val sb = StringBuilder()
+            var capitalizeNext = true
+            for (i in text.indices) {
+                val c = text[i]
+                if (capitalizeNext && c.isLetter()) {
+                    sb.append(c.uppercaseChar())
+                    capitalizeNext = false
+                } else {
+                    sb.append(c)
+                    if (c == '.' || c == '?' || c == '!') {
+                        capitalizeNext = true
+                    }
+                }
+            }
+            return sb.toString()
+        }
+
+        private fun joinSegments(base: String, addition: String): String {
+            if (base.isEmpty()) return addition
+            if (addition.isEmpty()) return base
+            val trimmed = addition.trim()
+            if (trimmed.isEmpty()) return base
+            return if (trimmed.startsWith(".") || trimmed.startsWith(",") || trimmed.startsWith("?") ||
+                trimmed.startsWith("!") || trimmed.startsWith(":") || trimmed.startsWith(";")) {
+                base + trimmed
+            } else {
+                "$base $trimmed"
+            }
+        }
+
         private fun transcript(results: Bundle?, final: Boolean) {
             if (!current() || speechDone) return
-            val segment = text(results).trim()
+            val rawSegment = text(results).trim()
+            val segment = formatPunctuation(rawSegment)
             if (final && segment.isNotEmpty()) {
-                committed = listOf(committed, segment).filter { it.isNotEmpty() }.joinToString(" ")
+                committed = joinSegments(committed, segment)
             }
-            val display = if (final) committed else listOf(committed, segment).filter { it.isNotEmpty() }.joinToString(" ")
+            val display = if (final) committed else joinSegments(committed, segment)
             emit(mapOf("type" to "transcript", "text" to display, "isFinal" to final))
         }
 

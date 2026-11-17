@@ -27,7 +27,7 @@ internal class CaptureSession(
 
     private val running = AtomicBoolean(false)
     private val feeding = AtomicBoolean(true)
-    private val queue = ArrayBlockingQueue<ByteArray>(64) // <= ~1.28 seconds of PCM
+    private val queue = ArrayBlockingQueue<ByteArray>(256) // ~5.12 seconds of PCM buffer
     private val pipe = ParcelFileDescriptor.createPipe()
     val speechInput: ParcelFileDescriptor get() = pipe[0]
     private var audio: AudioRecord? = null
@@ -102,12 +102,10 @@ internal class CaptureSession(
         try {
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO)
             while (running.get()) {
-                val count = audio!!.read(bytes, 0, bytes.size, AudioRecord.READ_NON_BLOCKING)
+                val count = audio!!.read(bytes, 0, bytes.size, AudioRecord.READ_BLOCKING)
+                if (!running.get()) break
                 if (count < 0) error("AudioRecord read failed ($count)")
-                if (count == 0) {
-                    Thread.sleep(5)
-                    continue
-                }
+                if (count == 0) continue
                 wav!!.write(bytes, count)
                 if (feeding.get() && !queue.offer(bytes.copyOf(count))) {
                     speechFailure("Speech service fell behind the microphone.")
@@ -155,7 +153,7 @@ internal class CaptureSession(
                         }
                     } catch (error: ErrnoException) {
                         if (error.errno != OsConstants.EAGAIN && error.errno != OsConstants.EINTR) throw error
-                        if (SystemClock.elapsedRealtime() - lastProgress > 2000) {
+                        if (SystemClock.elapsedRealtime() - lastProgress > 5000) {
                             throw IllegalStateException("Speech service stopped reading audio")
                         }
                         Thread.sleep(5)
